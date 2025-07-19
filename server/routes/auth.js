@@ -175,36 +175,141 @@ router.post('/login', validateLogin, async (req, res) => {
   }
 });
 
-// @route   GET /api/auth/google
-// @desc    Start Google OAuth flow
-// @access  Public
-router.get('/google', 
-  passport.authenticate('google', { 
-    scope: ['profile', 'email'] 
-  })
+// Google OAuth Routes (Traditional flow - keeping for compatibility)
+router.get('/google',
+
+  passport.authenticate('google', { scope: ['profile', 'email'] })
 );
 
-// @route   GET /api/auth/google/callback
-// @desc    Google OAuth callback
-// @access  Public
 router.get('/google/callback',
-  passport.authenticate('google', { 
-    failureRedirect: `${process.env.CLIENT_URL}/login?error=oauth_failed`,
-    session: false 
-  }),
+  passport.authenticate('google', { failureRedirect: '/login?error=oauth_failed' }),
   async (req, res) => {
     try {
-      // Generate JWT token
-      const token = req.user.getJWTToken();
-      
+      const token = jwt.sign(
+        { userId: req.user._id },
+        process.env.JWT_SECRET,
+        { expiresIn: process.env.JWT_EXPIRE }
+      );
+
       // Redirect to frontend with token
-      res.redirect(`${process.env.CLIENT_URL}/auth/success?token=${token}`);
+      res.redirect(`${process.env.CLIENT_URL}/?token=${token}&user=${encodeURIComponent(JSON.stringify({
+        id: req.user._id,
+        firstName: req.user.firstName,
+        lastName: req.user.lastName,
+        email: req.user.email
+      }))}`);
     } catch (error) {
-      console.error('Google OAuth Callback Error:', error);
-      res.redirect(`${process.env.CLIENT_URL}/login?error=oauth_callback_failed`);
+      console.error('Google OAuth callback error:', error);
+      res.redirect(`${process.env.CLIENT_URL}/login?error=oauth_failed`);
     }
   }
 );
+
+// Google OAuth JWT Token Route (for frontend integration)
+router.post('/google', async (req, res) => {
+  try {
+    const { token } = req.body;
+    console.log('Google token:', token);
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: 'Google token is required'
+      });
+    }
+
+    // Verify Google JWT token
+    const { OAuth2Client } = require('google-auth-library');
+    const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+    
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    
+    const payload = ticket.getPayload();
+    const { sub: googleId, email, given_name: firstName, family_name: lastName, picture } = payload;
+    
+    let user;
+    let isNewUser = false;
+    
+    // Check if user already exists with this email
+    user = await User.findOne({ email });
+    
+    if (user) {
+      // Check if this is a Google user or regular user
+      if (user.googleId && user.googleId !== googleId) {
+        return res.status(400).json({
+          success: false,
+          message: 'This email is associated with a different Google account.'
+        });
+      }
+      
+      if (!user.googleId) {
+        // Link Google account to existing regular user
+        user.googleId = googleId;
+        user.avatar = picture;
+        user.isVerified = true;
+      } else {
+        // Update existing Google user info
+        user.avatar = picture;
+      }
+      
+      await user.save();
+    } else {
+      // Create new user with Google account
+      isNewUser = true;
+      user = new User({
+        firstName,
+        lastName,
+        email,
+        googleId,
+        avatar: picture,
+        isVerified: true,
+        isActive: true
+      });
+      
+      await user.save();
+    }
+
+    // Generate JWT token using the user's method
+    const jwtToken = user.getJWTToken();
+
+    // Update last login
+    user.lastLogin = new Date();
+    await user.save();
+
+    res.json({
+      success: true,
+      message: isNewUser ? 'Account created successfully with Google' : 'Logged in successfully with Google',
+      token: jwtToken,
+      isNewUser,
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        avatar: user.avatar,
+        isVerified: user.isVerified
+      }
+    });
+
+  } catch (error) {
+    console.error('Google OAuth error:', error);
+    
+    if (error.message && error.message.includes('Invalid token')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid Google token. Please try again.'
+      });
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: 'Google authentication failed. Please try again.'
+    });
+  }
+});
 
 // @route   POST /api/auth/logout
 // @desc    Logout user
