@@ -6,6 +6,7 @@ const Navbar = () => {
   const [isScrolled, setIsScrolled] = useState(false);
   const navigate = useNavigate();
 
+  
   // Handle scroll effect
   useEffect(() => {
     const handleScroll = () => {
